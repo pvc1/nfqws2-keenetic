@@ -1,6 +1,6 @@
 # Keenetic policy mark
 POLICY_MARK=
-# Marks for excliude packets
+# Marks for excluded packets
 MARK_EXCLUDE="0x20000000/0x20000000"
 # nfqws2 processed mark
 MARK_PROCESSED="0x40000000/0x40000000"
@@ -244,7 +244,6 @@ _firewall_start() {
   local POLICY_RET_RULE=""
   if [ -n "$POLICY_MARK" ]; then
     if [ -n "$POLICY_EXCLUDE" ] && [ "$POLICY_EXCLUDE" -ne "0" ]; then
-      POLICY_EXC_RULE="-m mark --mark $POLICY_MARK $CONN_SET_EXCLUDE"
       POLICY_RET_RULE="-m mark --mark $POLICY_MARK -j RETURN"
     else
       POLICY_EXC_RULE="-m mark ! --mark $POLICY_MARK $CONN_SET_EXCLUDE"
@@ -268,17 +267,15 @@ _firewall_start() {
 
   for IFACE in $ISP_INTERFACE; do
     # --- POSTROUTING (outgoing) ---
-    # Apply policy-based exclusion
+    # POLICY_EXCLUDE=0 stores non-policy connections in connmark to skip their replies.
+    # POLICY_EXCLUDE=1 only returns current policy-marked packets to avoid touching Keenetic PBR state.
     if [ -n "$POLICY_EXC_RULE" ]; then
       $CMD -w -t mangle -A $IPT_GROUP_POST -o $IFACE $POLICY_EXC_RULE
+      $CMD -w -t mangle -A $IPT_GROUP_POST -o $IFACE -m connmark --mark $MARK_EXCLUDE -j RETURN
     fi
-    # Immediately return for packets matching the policy exclusion condition (deterministic for the current packet).
     if [ -n "$POLICY_RET_RULE" ]; then
       $CMD -w -t mangle -A $IPT_GROUP_POST -o $IFACE $POLICY_RET_RULE
     fi
-
-    # Return for policy-excluded connections
-    $CMD -w -t mangle -A $IPT_GROUP_POST -o $IFACE -m connmark --mark $MARK_EXCLUDE -j RETURN
 
     # NFQUEUE rules (process only packets NOT marked as processed)
     $CMD -w -t mangle -A $IPT_GROUP_POST -o $IFACE $CONN_CHECK -p udp -m multiport --dports $UDP_PORTS $CB_ORIG --connbytes 1:$MAX_PKT_OUT $JNFQ
@@ -292,8 +289,12 @@ _firewall_start() {
     fi
 
     # --- PREROUTING (incoming / replies) ---
-    # Return for policy-excluded connections
-    $CMD -w -t mangle -A $IPT_GROUP_PRE -i $IFACE -m connmark --mark $MARK_EXCLUDE -j RETURN
+    if [ -n "$POLICY_RET_RULE" ] && [ -z "$POLICY_EXC_RULE" ]; then
+      $CMD -w -t mangle -A $IPT_GROUP_PRE -i $IFACE $POLICY_RET_RULE
+    fi
+    if [ -n "$POLICY_EXC_RULE" ]; then
+      $CMD -w -t mangle -A $IPT_GROUP_PRE -i $IFACE -m connmark --mark $MARK_EXCLUDE -j RETURN
+    fi
 
     # Already processed packets should not be re-queued.
     $CMD -w -t mangle -A $IPT_GROUP_PRE -i $IFACE -m mark --mark $MARK_PROCESSED -j RETURN
